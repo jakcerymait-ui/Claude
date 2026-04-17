@@ -93,46 +93,61 @@ export default function ResonanceSuppressor() {
   const isPlayingRef      = useRef(false);
   const currentFiltersRef = useRef([]);
   const frameRef          = useRef(0);
+  const workletLoadingRef = useRef(false);
 
   useEffect(() => { controlsRef.current = controls; }, [controls]);
   useEffect(() => { isBypassedRef.current = isBypassed; }, [isBypassed]);
   useEffect(() => { isPlayingRef.current = isPlaying;   }, [isPlaying]);
 
-  // ── audio graph setup ──────────────────────────────────────────────────────
+  // ── audio graph: create context + nodes synchronously (no worklet yet) ─────
 
-  const setupGraph = useCallback(async () => {
-    if (audioCtxRef.current) return;
+  const initGraph = useCallback(() => {
+    if (audioCtxRef.current) return audioCtxRef.current;
     const ctx = new AudioContext();
     audioCtxRef.current = ctx;
 
-    await ctx.audioWorklet.addModule('/resonance-processor.js');
-
     const aBef = ctx.createAnalyser();
-    aBef.fftSize = 4096;
-    aBef.smoothingTimeConstant = 0.8;
+    aBef.fftSize = 4096; aBef.smoothingTimeConstant = 0.8;
     analyserBefRef.current = aBef;
 
     const aAft = ctx.createAnalyser();
-    aAft.fftSize = 4096;
-    aAft.smoothingTimeConstant = 0.8;
+    aAft.fftSize = 4096; aAft.smoothingTimeConstant = 0.8;
     analyserAftRef.current = aAft;
 
-    const worklet = new AudioWorkletNode(ctx, 'resonance-processor');
-    workletNodeRef.current = worklet;
+    // Start with dry pass-through; worklet will rewire once loaded
+    const wet = ctx.createGain(); wet.gain.value = 0; wetGainRef.current = wet;
+    const dry = ctx.createGain(); dry.gain.value = 1; dryGainRef.current = dry;
+    aBef.connect(dry); dry.connect(aAft); aAft.connect(ctx.destination);
 
-    const wet = ctx.createGain(); wet.gain.value = 1;
-    const dry = ctx.createGain(); dry.gain.value = 0;
-    wetGainRef.current = wet;
-    dryGainRef.current = dry;
-
-    // Graph: source → aBef → wet → worklet → aAft → dest
-    //                      → dry ────────────↗
-    aBef.connect(wet); wet.connect(worklet); worklet.connect(aAft);
-    aBef.connect(dry); dry.connect(aAft);
-    aAft.connect(ctx.destination);
-
-    setWorkletReady(true);
+    return ctx;
   }, []);
+
+  // ── load AudioWorklet in the background — never blocks decode ──────────────
+
+  const loadWorklet = useCallback(async () => {
+    const ctx = audioCtxRef.current;
+    if (!ctx || workletNodeRef.current || workletLoadingRef.current) return;
+    workletLoadingRef.current = true;
+    try {
+      await ctx.audioWorklet.addModule('/resonance-processor.js');
+      const worklet = new AudioWorkletNode(ctx, 'resonance-processor');
+      workletNodeRef.current = worklet;
+
+      // Wire wet path: aBef → wet → worklet → aAft
+      analyserBefRef.current.connect(wetGainRef.current);
+      wetGainRef.current.connect(worklet);
+      worklet.connect(analyserAftRef.current);
+
+      if (!isBypassedRef.current) {
+        dryGainRef.current.gain.value = 0;
+        wetGainRef.current.gain.value = 1;
+      }
+      setWorkletReady(true);
+    } catch (err) {
+      console.error('AudioWorklet load failed:', err);
+    }
+    workletLoadingRef.current = false;
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── file upload ────────────────────────────────────────────────────────────
 
@@ -143,15 +158,15 @@ export default function ResonanceSuppressor() {
     stopPlayback();
 
     try {
-      await setupGraph();
-      const ctx = audioCtxRef.current;
+      // 1. Ensure context exists (synchronous — no network I/O)
+      const ctx = initGraph();
       if (ctx.state === 'suspended') await ctx.resume();
 
+      // 2. Decode — completely independent of worklet loading
       const arrayBuf = await file.arrayBuffer();
-      // decodeAudioData can take a callback or return a Promise depending on browser;
-      // wrap in explicit Promise to normalise error handling.
-      const decoded = await new Promise((resolve, reject) => {
-        ctx.decodeAudioData(arrayBuf, resolve, reject);
+      const decoded  = await new Promise((resolve, reject) => {
+        ctx.decodeAudioData(arrayBuf, resolve,
+          (e) => reject(e || new Error('decodeAudioData failed')));
       });
       audioBufferRef.current = decoded;
       setAudioBuffer(decoded);
@@ -162,7 +177,10 @@ export default function ResonanceSuppressor() {
     } finally {
       setIsLoading(false);
     }
-  }, [setupGraph]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    // 3. Load worklet after decode — fire-and-forget, never blocks UI
+    loadWorklet();
+  }, [initGraph, loadWorklet]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const onFileInput = useCallback((e) => {
     const f = e.target.files[0];
