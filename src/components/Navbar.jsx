@@ -5,6 +5,7 @@ const links = [
   { to: '/compare', label: 'Compare' },
   { to: '/team', label: 'Team Stats' },
   { to: '/h2h', label: 'Head-to-Head' },
+  { to: '/resonance', label: 'Resonance Suppressor' },
 ];
 
 export default function Navbar() {

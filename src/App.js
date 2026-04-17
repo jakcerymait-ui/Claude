@@ -4,6 +4,7 @@ import PlayerSearch from './pages/PlayerSearch';
 import PlayerComparison from './pages/PlayerComparison';
 import TeamStats from './pages/TeamStats';
 import HeadToHead from './pages/HeadToHead';
+import ResonanceSuppressor from './pages/ResonanceSuppressor';
 
 function App() {
   return (
@@ -16,6 +17,7 @@ function App() {
             <Route path="/compare" element={<PlayerComparison />} />
             <Route path="/team" element={<TeamStats />} />
             <Route path="/h2h" element={<HeadToHead />} />
+            <Route path="/resonance" element={<ResonanceSuppressor />} />
           </Routes>
         </main>
       </div>
