@@ -142,21 +142,32 @@ export default function ResonanceSuppressor() {
     setFileName(file.name);
     stopPlayback();
 
-    await setupGraph();
-    const ctx = audioCtxRef.current;
-    if (ctx.state === 'suspended') await ctx.resume();
+    try {
+      await setupGraph();
+      const ctx = audioCtxRef.current;
+      if (ctx.state === 'suspended') await ctx.resume();
 
-    const arrayBuf = await file.arrayBuffer();
-    const decoded  = await ctx.decodeAudioData(arrayBuf);
-    audioBufferRef.current = decoded;
-    setAudioBuffer(decoded);
-    offsetRef.current = 0;
-    setIsLoading(false);
+      const arrayBuf = await file.arrayBuffer();
+      // decodeAudioData can take a callback or return a Promise depending on browser;
+      // wrap in explicit Promise to normalise error handling.
+      const decoded = await new Promise((resolve, reject) => {
+        ctx.decodeAudioData(arrayBuf, resolve, reject);
+      });
+      audioBufferRef.current = decoded;
+      setAudioBuffer(decoded);
+      offsetRef.current = 0;
+    } catch (err) {
+      console.error('Failed to decode audio:', err);
+      setFileName(`Error: could not decode "${file.name}"`);
+    } finally {
+      setIsLoading(false);
+    }
   }, [setupGraph]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const onFileInput = useCallback((e) => {
     const f = e.target.files[0];
     if (f) handleFile(f);
+    e.target.value = '';   // allow re-selecting the same file
   }, [handleFile]);
 
   const onDrop = useCallback((e) => {
@@ -507,7 +518,7 @@ export default function ResonanceSuppressor() {
             >
               LOAD FILE
             </label>
-            <input id="audio-upload" type="file" accept="audio/*" onChange={onFileInput} style={{ display: 'none' }} />
+            <input id="audio-upload" type="file" accept="audio/*,.wav,.mp3,.flac,.ogg,.aac,.m4a,.aiff,.aif" onChange={onFileInput} style={{ display: 'none' }} />
             <span style={{ fontSize: 13, color: fileName ? '#e2e8f0' : '#44445a' }}>
               {isLoading ? 'Decoding…' : (fileName || 'Drop audio file here or click LOAD FILE')}
             </span>
