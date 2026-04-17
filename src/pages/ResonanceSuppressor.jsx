@@ -31,6 +31,25 @@ function smoothSpectrum(data, halfWin) {
   return out;
 }
 
+// Normalise rendered buffer in-place so peak = targetLinear
+function normalizePeak(audioBuffer, targetDB = -0.5) {
+  const target = Math.pow(10, targetDB / 20);
+  let peak = 0;
+  for (let ch = 0; ch < audioBuffer.numberOfChannels; ch++) {
+    const d = audioBuffer.getChannelData(ch);
+    for (let i = 0; i < d.length; i++) {
+      const abs = Math.abs(d[i]);
+      if (abs > peak) peak = abs;
+    }
+  }
+  if (peak < 0.0001) return; // silence — nothing to do
+  const gain = target / peak;
+  for (let ch = 0; ch < audioBuffer.numberOfChannels; ch++) {
+    const d = audioBuffer.getChannelData(ch);
+    for (let i = 0; i < d.length; i++) d[i] *= gain;
+  }
+}
+
 function encodeWAV(audioBuffer) {
   const nCh = audioBuffer.numberOfChannels;
   const sr  = audioBuffer.sampleRate;
@@ -71,6 +90,7 @@ export default function ResonanceSuppressor() {
   const [isBypassed,     setIsBypassed]     = useState(false);
   const [isLoading,      setIsLoading]      = useState(false);
   const [isExporting,    setIsExporting]    = useState(false);
+  const [isMastering,    setIsMastering]    = useState(false);
   const [fileName,       setFileName]       = useState('');
   const [peakCount,      setPeakCount]      = useState(0);
   const [workletReady,   setWorkletReady]   = useState(false);
@@ -439,6 +459,97 @@ export default function ResonanceSuppressor() {
     setIsExporting(false);
   }, [fileName, isExporting]);
 
+  // ── mix & master vocal ─────────────────────────────────────────────────────
+
+  const handleMixMaster = useCallback(async () => {
+    const buf = audioBufferRef.current;
+    if (!buf || isMastering) return;
+    setIsMastering(true);
+
+    try {
+      const offCtx = new OfflineAudioContext(
+        buf.numberOfChannels, buf.length, buf.sampleRate
+      );
+
+      const src = offCtx.createBufferSource();
+      src.buffer = buf;
+
+      // ── EQ ──────────────────────────────────────────────────────────────
+      // 1. High-pass 80 Hz — remove rumble / low-end noise
+      const hp = offCtx.createBiquadFilter();
+      hp.type = 'highpass'; hp.frequency.value = 80; hp.Q.value = 0.707;
+
+      // 2. Low-mid tuck 300 Hz — reduce boxiness / muddiness
+      const lowMid = offCtx.createBiquadFilter();
+      lowMid.type = 'peaking'; lowMid.frequency.value = 300;
+      lowMid.Q.value = 1.4; lowMid.gain.value = -3;
+
+      // 3. Presence lift 3 kHz — intelligibility / clarity
+      const presence = offCtx.createBiquadFilter();
+      presence.type = 'peaking'; presence.frequency.value = 3000;
+      presence.Q.value = 1.0; presence.gain.value = 2.5;
+
+      // 4. Air shelf 10 kHz — brightness / openness
+      const air = offCtx.createBiquadFilter();
+      air.type = 'highshelf'; air.frequency.value = 10000; air.gain.value = 3;
+
+      // ── Dynamics ────────────────────────────────────────────────────────
+      // 5. Vocal compressor — glue and control
+      const comp = offCtx.createDynamicsCompressor();
+      comp.threshold.value = -20; // dBFS
+      comp.knee.value      = 10;
+      comp.ratio.value     = 3.5;
+      comp.attack.value    = 0.008;  // 8 ms
+      comp.release.value   = 0.12;   // 120 ms
+
+      // 6. De-esser — tame harsh sibilance around 7.5 kHz
+      const deEss = offCtx.createBiquadFilter();
+      deEss.type = 'peaking'; deEss.frequency.value = 7500;
+      deEss.Q.value = 4; deEss.gain.value = -5;
+
+      // 7. Limiter — transparent ceiling before output
+      const lim = offCtx.createDynamicsCompressor();
+      lim.threshold.value = -2;
+      lim.knee.value      = 0;
+      lim.ratio.value     = 20;
+      lim.attack.value    = 0.0005; // 0.5 ms
+      lim.release.value   = 0.05;  // 50 ms
+
+      // 8. Makeup gain — compensate for compression gain reduction
+      const makeup = offCtx.createGain();
+      makeup.gain.value = 1.5; // ~3.5 dB; normalise will handle final level
+
+      // Connect chain: src → hp → lowMid → presence → air → comp → deEss → lim → makeup → dest
+      src.connect(hp);
+      hp.connect(lowMid);
+      lowMid.connect(presence);
+      presence.connect(air);
+      air.connect(comp);
+      comp.connect(deEss);
+      deEss.connect(lim);
+      lim.connect(makeup);
+      makeup.connect(offCtx.destination);
+      src.start();
+
+      const rendered = await offCtx.startRendering();
+
+      // Peak-normalise to -0.5 dBFS
+      normalizePeak(rendered, -0.5);
+
+      const wav  = encodeWAV(rendered);
+      const blob = new Blob([wav], { type: 'audio/wav' });
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement('a');
+      a.href     = url;
+      a.download = `vocal_master_${fileName.replace(/\.[^.]+$/, '')}.wav`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+    } catch (err) {
+      console.error('Mix & master failed:', err);
+    }
+    setIsMastering(false);
+  }, [fileName, isMastering]);
+
   // ── cleanup on unmount ─────────────────────────────────────────────────────
 
   useEffect(() => () => {
@@ -695,6 +806,57 @@ export default function ResonanceSuppressor() {
             {isExporting ? '⏳ EXPORTING…' : '⬇ EXPORT WAV'}
           </button>
         </div>
+
+        {/* ── Mix & Master Vocal ──────────────────────────────────────────── */}
+        <div style={{
+          marginTop: 10,
+          background: '#0e0e1c',
+          border: '1px solid #2a1f3d',
+          borderRadius: 10,
+          padding: '14px 24px',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 16,
+        }}>
+          <div>
+            <p style={{ margin: 0, fontSize: 12, fontWeight: 700, color: '#c4b5fd', letterSpacing: '0.08em' }}>
+              MIX &amp; MASTER VOCAL
+            </p>
+            <p style={{ margin: '3px 0 0', fontSize: 11, color: '#6b5fa0' }}>
+              HP filter · EQ · compression · de-essing · limiting · peak normalise → WAV
+            </p>
+          </div>
+          <button
+            onClick={handleMixMaster}
+            disabled={!audioBuffer || isMastering}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 9,
+              padding: '11px 26px',
+              borderRadius: 7,
+              border: 'none',
+              background: audioBuffer && !isMastering
+                ? 'linear-gradient(135deg, #7c3aed, #6d28d9)'
+                : '#1e1830',
+              color: audioBuffer && !isMastering ? '#fff' : '#44445a',
+              fontSize: 13,
+              fontWeight: 700,
+              letterSpacing: '0.08em',
+              cursor: audioBuffer && !isMastering ? 'pointer' : 'default',
+              boxShadow: audioBuffer && !isMastering ? '0 0 18px #7c3aed50' : 'none',
+              transition: 'all 0.15s',
+              whiteSpace: 'nowrap',
+              flexShrink: 0,
+            }}
+          >
+            {isMastering
+              ? <><span style={{ display: 'inline-block', animation: 'spin 1s linear infinite' }}>⚙</span> MASTERING…</>
+              : <><span>✦</span> MASTER VOCAL</>
+            }
+          </button>
+        </div>
+
+        <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
 
         {/* ── Legend ──────────────────────────────────────────────────────── */}
         <div style={{ marginTop: 16, display: 'flex', gap: 24, justifyContent: 'center', flexWrap: 'wrap' }}>
