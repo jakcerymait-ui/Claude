@@ -1,6 +1,5 @@
 import { useState, useCallback, useRef } from 'react';
 
-const CLAUDE_MODEL = 'claude-sonnet-4-5';
 
 function buildPrompt(replacementText) {
   return `You are a professional logo designer and SVG expert. Carefully analyze this logo image and recreate it as valid SVG markup, replacing ONLY the text/lettering with "${replacementText}".
@@ -148,27 +147,21 @@ export default function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          model: CLAUDE_MODEL,
-          max_tokens: 4096,
-          messages: [{
-            role: 'user',
-            content: [
-              { type: 'image', source: { type: 'base64', media_type: imageMediaType, data: imageBase64 } },
-              { type: 'text', text: buildPrompt(replacementText.trim()) },
-            ],
-          }],
+          imageBase64,
+          mediaType: imageMediaType,
+          prompt: buildPrompt(replacementText.trim()),
         }),
       });
 
       const data = await res.json();
       if (!res.ok) throw new Error(data.error?.message || `API error ${res.status}`);
 
-      let svg = data.content?.[0]?.text?.trim() ?? '';
+      let svg = (data.text ?? '').trim();
       svg = svg.replace(/^```(?:svg|xml|html)?\s*/i, '').replace(/\s*```$/i, '').trim();
 
       const match = svg.match(/<svg[\s\S]*<\/svg>/i);
       if (match) svg = match[0];
-      if (!svg.startsWith('<svg')) throw new Error('Claude did not return valid SVG. Try a clearer logo image.');
+      if (!svg.startsWith('<svg')) throw new Error('Gemini did not return valid SVG. Try a clearer logo image.');
 
       setGeneratedSVG(svg);
     } catch (err) {
